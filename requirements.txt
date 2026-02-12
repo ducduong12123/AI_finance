@@ -1,0 +1,45 @@
+# AI Finance Assistant - Python Dependencies
+# Generated from pyproject.toml
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# AI/ML
+google-generativeai==0.3.2
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-google-genai==0.0.6
+
+# Database
+qdrant-client==1.7.0
+supabase==2.0.0
+
+# Data Processing
+pandas==2.0.3
+numpy==1.24.4
+
+# Configuration
+pydantic==2.5.2
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Document Processing
+pypdf==4.0.0
+langchain-text-splitters==0.0.1
+
+# Multi-Agent System Dependencies (NEW)
+# ======================================
+aiohttp==3.9.1              # For Tavily API async requests
+vnstock==0.2.6              # Vietnam stock market data (TCBS & SSI APIs)
+
+# Utils
+httpx==0.26.0
+python-multipart==0.0.6
+
+# Development (optional)
+# pytest==7.4.3
+# pytest-asyncio==0.21.1
+# black==23.0.0
+# ruff==0.1.6
+# mypy==1.7.1
