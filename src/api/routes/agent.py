@@ -137,65 +137,354 @@ async def agent_query(request: AgentQueryRequest):
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
 
 
+# ============================================
+# SSE Event Formatter (OpenAPI Spec Compliant)
+# ============================================
+
+# Map internal stage names to OpenAPI event types
+STAGE_TO_EVENT_TYPE = {
+    "start": "START",
+    "iteration_start": "START",
+    "planning": "PLANNING",
+    "plan_created": "PLAN_CREATED",
+    "critic_review": "CRITIC_REVIEWED",
+    "plan_reviewed": "CRITIC_REVIEWED",
+    "executing": "TOOL_EXECUTING",
+    "tools_completed": "TOOL_COMPLETED",
+    "synthesizing": "SYNTHESIZING",
+    "response_ready": "SYNTHESIZING",
+    "result_review": "CRITIC_REVIEWED",
+    "result_reviewed": "CRITIC_REVIEWED",
+    "completed": "FINAL_RESULT",
+    "final_result": "FINAL_RESULT",
+    "error": "ERROR",
+    "timeout": "ERROR",
+    "plan_rejected": "CRITIC_REVIEWED",
+    "iterating": "PLANNING",
+}
+
+# Total steps in the workflow
+TOTAL_WORKFLOW_STEPS = 6
+
+
+def format_sse_event(
+    stage: str, data: dict, iteration: int, execution_start: float
+) -> dict:
+    """
+    Format event to match OpenAPI spec:
+    {
+        "eventType": "START",
+        "payload": {...},
+        "metadata": {
+            "iteration": 1,
+            "timestamp": "2026-02-12T07:20:36.104Z",
+            "executionTime": 0
+        },
+        "progress": {
+            "currentStep": 1,
+            "totalSteps": 6,
+            "percentComplete": 0
+        }
+    }
+    """
+    event_type = STAGE_TO_EVENT_TYPE.get(stage, stage.upper())
+    execution_time = (time.time() - execution_start) * 1000  # Convert to ms
+
+    # Calculate progress
+    progress_map = {
+        "START": {
+            "currentStep": 1,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 0,
+        },
+        "PLANNING": {
+            "currentStep": 2,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 16,
+        },
+        "PLAN_CREATED": {
+            "currentStep": 2,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 33,
+        },
+        "CRITIC_REVIEWED": {
+            "currentStep": 3,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 50,
+        },
+        "TOOL_EXECUTING": {
+            "currentStep": 4,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 66,
+        },
+        "TOOL_COMPLETED": {
+            "currentStep": 4,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 66,
+        },
+        "SYNTHESIZING": {
+            "currentStep": 5,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 83,
+        },
+        "FINAL_RESULT": {
+            "currentStep": 6,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 100,
+        },
+        "ERROR": {
+            "currentStep": 6,
+            "totalSteps": TOTAL_WORKFLOW_STEPS,
+            "percentComplete": 100,
+        },
+    }
+
+    progress = progress_map.get(
+        event_type,
+        {"currentStep": 1, "totalSteps": TOTAL_WORKFLOW_STEPS, "percentComplete": 0},
+    )
+
+    # Format payload based on event type
+    payload = _format_payload(stage, data, event_type)
+
+    return {
+        "eventType": event_type,
+        "payload": payload,
+        "metadata": {
+            "iteration": iteration,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "executionTime": round(execution_time, 2),
+        },
+        "progress": progress,
+    }
+
+
+def _format_payload(stage: str, data: dict, event_type: str) -> dict:
+    """Format payload based on stage and event type."""
+
+    if event_type == "START":
+        return {"query": data.get("query", "")}
+
+    elif event_type == "PLANNING":
+        return {"message": data.get("message", "Đang lập kế hoạch...")}
+
+    elif event_type == "PLAN_CREATED":
+        return {"plan": data.get("plan", {})}
+
+    elif event_type == "CRITIC_REVIEWED":
+        # Can be either plan review or result review
+        if "review" in data:
+            return data["review"]
+        elif "message" in data:
+            return {
+                "approved": True,
+                "score": 0,
+                "reasoning": data["message"],
+                "concerns": [],
+                "suggestions": [],
+                "requiresChanges": False,
+                "iterationFeedback": None,
+            }
+        return data
+
+    elif event_type == "TOOL_EXECUTING":
+        if "tool_name" in data:
+            return {
+                "toolName": data["tool_name"],
+                "parameters": data.get("parameters", {}),
+            }
+        return {
+            "message": data.get("message", "Đang thực thi các công cụ..."),
+        }
+
+    elif event_type == "TOOL_COMPLETED":
+        if "tool_name" in data:
+            return {
+                "toolName": data["tool_name"],
+                "success": data.get("success", True),
+                "executionTime": data.get("execution_time", 0),
+                "result": data.get("result", ""),
+            }
+        # Batch tool completion
+        success_count = (
+            data.get("successCount")
+            if data.get("successCount") is not None
+            else data.get("results", 0)
+        )
+        total_count = data.get("total", success_count)
+        return {
+            "message": data.get("message", "Hoàn thành thực thi công cụ"),
+            "count": success_count,
+            "total": total_count,
+            "success": True,
+        }
+
+    elif event_type == "SYNTHESIZING":
+        return {"message": data.get("message", "Đang tổng hợp kết quả...")}
+
+    elif event_type == "FINAL_RESULT":
+        return data  # Full result data
+
+    elif event_type == "ERROR":
+        return {
+            "code": data.get("code", "UNKNOWN_ERROR"),
+            "message": data.get("error", data.get("message", "Đã xảy ra lỗi")),
+            "details": data.get("details", {}),
+        }
+
+    return data
+
+
+import time
+
+
 @router.post("/query/stream")
 async def agent_query_stream(request: AgentQueryRequest):
     """
     Stream agent execution progress.
 
-    Returns Server-Sent Events (SSE) with progress updates:
-    - iteration_start
-    - planning
-    - critic_review
-    - executing
-    - response_ready
-    - completed
+    Returns Server-Sent Events (SSE) matching OpenAPI spec:
+    - START - Workflow bắt đầu
+    - PLANNING - Orchestrator đang phân tích
+    - PLAN_CREATED - Plan được tạo
+    - CRITIC_REVIEWED - Critic đánh giá plan
+    - TOOL_EXECUTING - Đang chạy tools
+    - TOOL_COMPLETED - Tools hoàn thành
+    - SYNTHESIZING - Đang tổng hợp kết quả
+    - FINAL_RESULT - Kết quả cuối cùng
+
+    Format (per OpenAPI spec):
+    {
+        "eventType": "START",
+        "payload": {...},
+        "metadata": {...},
+        "progress": {...}
+    }
     """
     from fastapi.responses import StreamingResponse
 
     async def event_stream():
         progress_queue = asyncio.Queue()
+        execution_start = time.time()
+        current_iteration = 1
 
         def progress_callback(stage: str, data: dict):
+            # Map to OpenAPI format
             asyncio.create_task(
                 progress_queue.put(
                     {
                         "stage": stage,
                         "data": data,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "iteration": current_iteration,
+                        "execution_start": execution_start,
                     }
                 )
             )
 
         # Run agent loop in background
         async def run_agent():
-            result = await agent_loop.execute(
-                user_query=request.query,
-                session_id=request.session_id,
-                progress_callback=progress_callback,
-            )
-            await progress_queue.put(
-                {"stage": "final_result", "data": result.model_dump()}
-            )
+            nonlocal current_iteration
+            try:
+                result = await agent_loop.execute(
+                    user_query=request.query,
+                    session_id=request.session_id,
+                    progress_callback=progress_callback,
+                )
+
+                # Format final result to match OpenAPI AgentQueryResponse
+                await progress_queue.put(
+                    {
+                        "stage": "final_result",
+                        "data": {
+                            "success": result.success,
+                            "query": result.query,
+                            "answer": result.final_answer,
+                            "iterations": result.iterations,
+                            "executionTime": result.execution_time,
+                            "planSummary": {
+                                "intent": result.plan.interpreted_intent,
+                                "toolsPlanned": [
+                                    t.tool_name for t in result.plan.tools
+                                ],
+                                "canParallel": result.plan.can_parallel,
+                            },
+                            "toolExecutions": [
+                                {
+                                    "tool": r.tool_name,
+                                    "success": r.success,
+                                    "executionTime": r.execution_time,
+                                }
+                                for r in result.tool_results
+                            ],
+                            "criticReviews": result.critic_reviews,
+                            "metrics": result.metrics,
+                        },
+                        "iteration": result.iterations,
+                        "execution_start": execution_start,
+                    }
+                )
+            except Exception as e:
+                await progress_queue.put(
+                    {
+                        "stage": "error",
+                        "data": {
+                            "code": "AGENT_ERROR",
+                            "message": str(e),
+                        },
+                        "iteration": current_iteration,
+                        "execution_start": execution_start,
+                    }
+                )
 
         # Start agent execution
         agent_task = asyncio.create_task(run_agent())
 
-        # Stream progress
+        # Stream progress in OpenAPI format
         while True:
             try:
                 # Wait for progress update with timeout
                 update = await asyncio.wait_for(progress_queue.get(), timeout=60.0)
 
+                stage = update["stage"]
+                data = update["data"]
+                iteration = update.get("iteration", 1)
+                exec_start = update.get("execution_start", execution_start)
+
+                # Track iteration for loop
+                if stage == "iteration_start":
+                    current_iteration = data.get("iteration", 1)
+
+                # Format to OpenAPI spec
+                sse_event = format_sse_event(stage, data, iteration, exec_start)
+
                 # Format as SSE
-                event_data = json.dumps(update, default=str)
+                event_data = json.dumps(sse_event, default=str, ensure_ascii=False)
                 yield f"data: {event_data}\n\n"
 
-                # Check if final result
-                if update["stage"] == "final_result":
+                # Check if final result or error
+                if stage in ("final_result", "error", "timeout"):
                     break
 
             except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'stage': 'timeout', 'error': 'Execution timeout'})}\n\n"
+                # Send timeout event in OpenAPI format
+                timeout_event = {
+                    "eventType": "ERROR",
+                    "payload": {
+                        "code": "TIMEOUT",
+                        "message": "Execution timeout after 60 seconds",
+                    },
+                    "metadata": {
+                        "iteration": current_iteration,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "executionTime": (time.time() - execution_start) * 1000,
+                    },
+                    "progress": {
+                        "currentStep": TOTAL_WORKFLOW_STEPS,
+                        "totalSteps": TOTAL_WORKFLOW_STEPS,
+                        "percentComplete": 100,
+                    },
+                }
+                yield f"data: {json.dumps(timeout_event, default=str)}\n\n"
                 break
 
         # Ensure agent task completes

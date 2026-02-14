@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 import google.generativeai as genai
 
 from core.config import settings
+from agents.base import BaseAgent
 from agents.orchestrator import OrchestratorPlan, ToolResult
 
 
@@ -21,73 +22,70 @@ class CriticReview(BaseModel):
     """Review result from Critic agent."""
 
     approved: bool = Field(..., description="Whether the plan/result is approved")
-    score: float = Field(..., ge=0, le=10, description="Quality score (0-10)")
+    score: float = Field(..., ge=0, le=5, description="Quality score (0-5)")
     reasoning: str = Field(..., description="Detailed reasoning")
     concerns: list[str] = Field(default_factory=list, description="List of concerns")
     suggestions: list[str] = Field(
         default_factory=list, description="Improvement suggestions"
     )
     requires_changes: bool = Field(
-        default=False, description="Whether changes are required"
+        default=False, description="Whether changes are required (score 0-2)"
+    )
+    needs_clarification: bool = Field(
+        default=False, description="Whether to ask user for clarification (score 3-5)"
     )
     iteration_feedback: Optional[str] = Field(
-        default=None, description="Feedback for next iteration"
+        default=None, description="Feedback for Orchestrator if needs iteration"
+    )
+    clarification_questions: Optional[list[str]] = Field(
+        default=None, description="Questions to ask user if needs_clarification"
     )
 
 
-class CriticAgent:
+class CriticAgent(BaseAgent):
     """
     Critic Agent - Phản biện và đánh giá.
-
-    Vai trò:
-    1. Review plan từ Orchestrator trước khi thực thi
-    2. Chấp nhận/Từ chối plan với lý do
-    3. Đánh giá kết quả tools sau khi chạy
-    4. Quyết định có cần iteration không
     """
 
     SYSTEM_PROMPT = """Bạn là Critic Agent trong hệ thống AI Finance Assistant.
 
 NHIỆM VỤ:
-Đánh giá và phản biện kế hoạch (plan) của Orchestrator và kết quả thực thi.
+Đánh giá kết quả thực thi dựa trên "Intent đã diễn dịch" của Orchestrator (KHÔNG đánh giá dựa trên yêu cầu gốc của ngưởi dùng).
 
-TIÊU CHÍ ĐÁNH GIÁ:
-1. **Phù hợp**: Plan có đáp ứng đúng yêu cầu ngưởi dùng không?
-2. **Đầy đủ**: Có thiếu tool nào cần thiết không?
-3. **Hiệu quả**: Có tool nào dư thừa không?
-4. **Chính xác**: Parameters có đúng không?
-5. **Chất lượng kết quả**: Kết quả trả về có đáp ứng mong đợi?
+QUAN TRỌNG - TIÊU CHÍ ĐÁNH GIÁ (Thang điểm 0-5):
+0-2 điểm: KHÔNG ĐẠT - Yêu cầu Orchestrator lập lại plan
+  • Dùng kiến thức cũ thay vì tool
+  • Tool thất bại hoàn toàn
+  • Sai lệch nghiêm trọng so với intent
+  → "approved": false, "requires_changes": true
 
-QUY TẮC:
-- Score >= 8: Chất lượng tốt, có thể chấp nhận
-- Score 5-7: Cần cải thiện nhưng vẫn dùng được
-- Score < 5: Cần iteration (chạy lại)
+3-5 điểm: ĐẠT - Có thể trả lởi, nhưng cần hỏi thêm ngưởi dùng
+  • Thiếu thông tin chi tiết (ví dụ: thiếu P/E, ROE...)
+  • Có thể làm tốt hơn nhưng không bắt buộc
+  → "approved": true, "needs_clarification": true
+
+HƯỚNG DẪN ĐÁNH GIÁ:
+1. Luôn so sánh kết quả với "Intent đã diễn dịch" của Orchestrator
+2. Nếu Orchestrator chỉ intent là "lấy giá", đừng yêu cầu thêm P/E, ROE...
+3. Chỉ phản hồi lại Orchestrator khi score 0-2
+4. Score 3-5: approved=true, có thể đề xuất câu hỏi bổ sung
 
 OUTPUT FORMAT (JSON):
 {
     "approved": true|false,
-    "score": 0-10,
-    "reasoning": "Giải thích chi tiết...",
-    "concerns": ["Vấn đề 1", "Vấn đề 2"],
-    "suggestions": ["Gợi ý 1", "Gợi ý 2"],
+    "score": 0-5,
+    "reasoning": "Giải thích ngắn gọn...",
+    "concerns": ["Vấn đề 1"],
+    "suggestions": ["Gợi ý 1"],
     "requires_changes": true|false,
-    "iteration_feedback": "Hướng dẫn cho iteration tiếp theo (nếu cần)"
+    "needs_clarification": true|false,
+    "iteration_feedback": "Phản hồi cho Orchestrator (nếu requires_changes=true)",
+    "clarification_questions": ["Câu hỏi 1", "Câu hỏi 2"] (nếu needs_clarification=true)
 }
-
-VÍ DỤ:
-Plan: Chỉ tìm kiếm web cho "giá VCB"
-→ approved: false
-→ score: 4
-→ reasoning: "Nên dùng vnstock_get_quote để lấy giá real-time thay vì chỉ tìm kiếm web"
-→ suggestions: ["Thêm tool vnstock_get_quote với symbol='VCB'"]
-→ requires_changes: true
 """
 
     def __init__(self):
-        self.model = genai.GenerativeModel(
-            model_name=settings.PRIMARY_MODEL,
-            system_instruction=self.SYSTEM_PROMPT,
-        )
+        super().__init__(system_prompt=self.SYSTEM_PROMPT)
 
     async def review_plan(self, plan: OrchestratorPlan) -> CriticReview:
         """
@@ -124,7 +122,7 @@ Chỉ trả về JSON, không thêm text khác.
 """
 
         try:
-            response = await self.model.generate_content_async(prompt)
+            response = await self.generate_content_async(prompt)
             content = response.text
 
             # Extract JSON
@@ -179,23 +177,39 @@ Chỉ trả về JSON, không thêm text khác.
         prompt = f"""
 Đánh giá kết quả thực thi:
 
-Yêu cầu gốc: {plan.original_query}
-Intent: {plan.interpreted_intent}
+🎯 **CHỈ ĐÁNH GIÁ DỰA TRÊN INTENT ĐÃ DIỄN DỊCH - KHÔNG QUAN TÂM YÊU CẦU GỐC**
+
+Intent đã diễn dịch (TIÊU CHUẨN DUY NHẤT): {plan.interpreted_intent}
 
 Kết quả từ các tools:
 {chr(10).join(results_text)}
 
-Câu hỏi:
-1. Kết quả có đáp ứng yêu cầu không?
-2. Có thiếu thông tin quan trọng không?
-3. Có cần thêm iteration không?
-4. Chất lượng tổng thể (0-10)?
+📊 THANG ĐIỂM (0-5):
+- 0-2: Không đạt → requires_changes=true, phản hồi lại Orchestrator
+  • Dùng kiến thức cũ
+  • Tool thất bại hoàn toàn  
+  • Sai lệch nghiêm trọng so với intent
 
-Trả về đánh giá dưới dạng JSON theo format đã chỉ định.
+- 3-5: Đạt → approved=true
+  • Score 3-4: needs_clarification=true (có thể hỏi thêm)
+  • Score 5: needs_clarification=false (hoàn hảo)
+
+⚠️ **VÍ DỤ QUAN TRỌNG:**
+- Nếu intent là "Lấy giá VCB" → Chỉ cần có giá là đạt (Score 5), KHÔNG cần P/E, ROE
+- Nếu intent là "So sánh toàn diện VCB và VNM với P/E, ROE" → Cần đầy đủ chỉ số
+- Nếu intent là "Thông tin công ty VCB" → Chỉ cần info cơ bản, không cần giá
+
+❓ CÂU HỎI:
+1. Kết quả có đáp ứng đúng intent ở trên không? (KHÔNG quan tâm yêu cầu gốc)
+2. Có cần thêm iteration không? (chỉ khi 0-2 điểm)
+3. Có cần hỏi thêm ngưởi dùng không? (nếu 3-4 điểm)
+4. Chấm điểm 0-5?
+
+Trả về JSON theo format đã chỉ định.
 """
 
         try:
-            response = await self.model.generate_content_async(prompt)
+            response = await self.generate_content_async(prompt)
             content = response.text
 
             # Extract JSON

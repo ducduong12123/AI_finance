@@ -100,33 +100,47 @@ class VNStockTool:
             loop = asyncio.get_event_loop()
 
             def _fetch():
-                stock = self._get_vnstock().stock(symbol=symbol)
-                quote = stock.quote()
-                return quote
+                # NEW API: Use Quote class directly
+                from vnstock import Quote
+
+                # Use KBS source (works on Google Colab/Cloud)
+                quote = Quote(symbol=symbol.upper(), source="KBS")
+
+                # Get last 5 days to ensure we have trading data
+                end = datetime.now()
+                start = end - timedelta(days=7)
+                quote_data = quote.history(
+                    start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
+                )
+                return quote_data
 
             quote_data = await loop.run_in_executor(None, _fetch)
 
-            # Parse quote data
-            if isinstance(quote_data, dict):
-                price = float(quote_data.get("price", 0))
-                change = float(quote_data.get("change", 0))
-                change_percent = float(quote_data.get("changePercent", 0))
+            # Parse DataFrame - lay row gan nhat (cuoi cung)
+            if (
+                quote_data is not None
+                and hasattr(quote_data, "iloc")
+                and len(quote_data) > 0
+            ):
+                last_row = quote_data.iloc[-1]
+
+                # Map column names - vnstock co the dung ten khac
+                price = float(last_row.get("close", last_row.get("price", 0)))
+                open_price = float(last_row.get("open", 0))
+                high_price = float(last_row.get("high", 0))
+                low_price = float(last_row.get("low", 0))
+                volume = int(last_row.get("volume", 0))
+
+                # Tinh change tu open va close
+                change = price - open_price
+                change_percent = (change / open_price * 100) if open_price > 0 else 0
             else:
-                # DataFrame case
-                price = (
-                    float(quote_data["price"].iloc[0])
-                    if "price" in quote_data.columns
-                    else 0
-                )
-                change = (
-                    float(quote_data["change"].iloc[0])
-                    if "change" in quote_data.columns
-                    else 0
-                )
-                change_percent = (
-                    float(quote_data["changePercent"].iloc[0])
-                    if "changePercent" in quote_data.columns
-                    else 0
+                return VNStockResponse(
+                    success=False,
+                    symbol=symbol.upper(),
+                    data_type="quote",
+                    data=None,
+                    message="Không có dữ liệu giá cho mã này",
                 )
 
             quote = StockQuote(
@@ -134,18 +148,10 @@ class VNStockTool:
                 price=price,
                 change=change,
                 change_percent=change_percent,
-                volume=int(quote_data.get("volume", 0))
-                if isinstance(quote_data, dict)
-                else 0,
-                open_price=float(quote_data.get("open", 0))
-                if isinstance(quote_data, dict)
-                else 0,
-                high_price=float(quote_data.get("high", 0))
-                if isinstance(quote_data, dict)
-                else 0,
-                low_price=float(quote_data.get("low", 0))
-                if isinstance(quote_data, dict)
-                else 0,
+                volume=volume,
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
             )
 
             return VNStockResponse(
@@ -179,36 +185,36 @@ class VNStockTool:
 
             def _fetch():
                 stock = self._get_vnstock().stock(symbol=symbol)
-                info = stock.company()
+                # API vnstock moi: stock.company la object, can goi .overview()
+                info = stock.company.overview()  # type: ignore
                 return info
 
             info_data = await loop.run_in_executor(None, _fetch)
 
-            # Parse info - handle both dict and DataFrame
-            if isinstance(info_data, dict):
+            # Parse DataFrame
+            if hasattr(info_data, "iloc") and len(info_data) > 0:
+                row = info_data.iloc[0]
+
+                # Map column names tu vnstock API moi
                 info = StockInfo(
                     symbol=symbol.upper(),
-                    company_name=info_data.get("company_name", symbol),
-                    industry=info_data.get("industry"),
-                    exchange=info_data.get("exchange", "HOSE"),
-                    market_cap=info_data.get("market_cap"),
-                    eps=info_data.get("eps"),
-                    pe=info_data.get("pe"),
-                    pb=info_data.get("pb"),
+                    company_name=str(
+                        row.get("symbol", symbol)
+                    ),  # symbol la ten cong ty
+                    industry=str(row.get("business_model", ""))[:100]
+                    if row.get("business_model")
+                    else None,
+                    exchange=str(row.get("exchange", "HOSE")),
+                    market_cap=None,  # Khong co trong overview
+                    eps=None,  # Khong co trong overview
+                    pe=None,  # Khong co trong overview
+                    pb=None,  # Khong co trong overview
                 )
             else:
-                # DataFrame
                 info = StockInfo(
                     symbol=symbol.upper(),
-                    company_name=str(info_data["company_name"].iloc[0])
-                    if "company_name" in info_data.columns
-                    else symbol,
-                    industry=str(info_data["industry"].iloc[0])
-                    if "industry" in info_data.columns
-                    else None,
-                    exchange=str(info_data["exchange"].iloc[0])
-                    if "exchange" in info_data.columns
-                    else "HOSE",
+                    company_name=symbol,
+                    exchange="HOSE",
                 )
 
             return VNStockResponse(
@@ -250,7 +256,7 @@ class VNStockTool:
 
             def _fetch():
                 stock = self._get_vnstock().stock(symbol=symbol)
-                history = stock.history(
+                history = stock.history(  # type: ignore
                     start=start_date.strftime("%Y-%m-%d"),
                     end=end_date.strftime("%Y-%m-%d"),
                 )
@@ -312,11 +318,11 @@ class VNStockTool:
             def _fetch():
                 stock = self._get_vnstock().stock(symbol=symbol)
                 if report_type == "income":
-                    data = stock.income_statement()
+                    data = stock.income_statement()  # type: ignore
                 elif report_type == "balance":
-                    data = stock.balance_sheet()
+                    data = stock.balance_sheet()  # type: ignore
                 elif report_type == "cashflow":
-                    data = stock.cash_flow()
+                    data = stock.cash_flow()  # type: ignore
                 else:
                     raise ValueError(f"Unknown report type: {report_type}")
                 return data
@@ -347,17 +353,25 @@ class VNStockTool:
             return f"❌ {response.message}"
 
         quote = response.data
+        # vnstock API returns prices in "nghìn đồng" (thousands)
+        # Convert to VND by multiplying by 1000
+        price_vnd = quote.price * 1000
+        change_vnd = quote.change * 1000
+        open_vnd = quote.open_price * 1000
+        high_vnd = quote.high_price * 1000
+        low_vnd = quote.low_price * 1000
+
         lines = [
             f"## 📈 Thông tin cổ phiếu {quote.symbol}",
             "",
-            f"**Giá hiện tại:** {quote.price:,.0f} VND",
-            f"**Thay đổi:** {quote.change:+.0f} ({quote.change_percent:+.2f}%)",
+            f"**Giá hiện tại:** {price_vnd:,.0f} VND",
+            f"**Thay đổi:** {change_vnd:+,.0f} VND ({quote.change_percent:+.2f}%)",
             f"**Khối lượng giao dịch:** {quote.volume:,}",
             "",
             "**Giá trong ngày:**",
-            f"- Mở cửa: {quote.open_price:,.0f}",
-            f"- Cao nhất: {quote.high_price:,.0f}",
-            f"- Thấp nhất: {quote.low_price:,.0f}",
+            f"- Mở cửa: {open_vnd:,.0f} VND",
+            f"- Cao nhất: {high_vnd:,.0f} VND",
+            f"- Thấp nhất: {low_vnd:,.0f} VND",
         ]
         return "\n".join(lines)
 
@@ -392,7 +406,7 @@ vnstock_tool = VNStockTool()
 
 
 # Function interface for Gemini tool calling
-async def vnstock_get_quote(symbol: str) -> str:
+async def vnstock_get_quote(symbol: str, **kwargs) -> str:
     """
     Get current stock price and trading information for a Vietnamese stock.
 
@@ -415,7 +429,7 @@ async def vnstock_get_quote(symbol: str) -> str:
         return f"Lỗi khi lấy giá cổ phiếu {symbol}: {str(e)}"
 
 
-async def vnstock_get_company_info(symbol: str) -> str:
+async def vnstock_get_company_info(symbol: str, **kwargs) -> str:
     """
     Get company information and financial ratios.
 
@@ -438,7 +452,7 @@ async def vnstock_get_company_info(symbol: str) -> str:
         return f"Lỗi khi lấy thông tin công ty {symbol}: {str(e)}"
 
 
-async def vnstock_get_historical(symbol: str, days: int = 30) -> str:
+async def vnstock_get_historical(symbol: str, days: int = 30, **kwargs) -> str:
     """
     Get historical stock prices for analysis.
 

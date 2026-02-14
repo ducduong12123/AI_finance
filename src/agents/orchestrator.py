@@ -10,12 +10,15 @@ The Orchestrator is responsible for:
 
 import json
 import asyncio
+import re
+from enum import Enum
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime
 from pydantic import BaseModel, Field
 import google.generativeai as genai
 
 from core.config import settings
+from agents.base import BaseAgent
 from agents.tools.tavily_search import tavily_web_search
 from agents.tools.vnstock_tool import vnstock_get_quote, vnstock_get_company_info
 
@@ -31,6 +34,13 @@ class ToolPlan(BaseModel):
     priority: int = Field(default=1, description="Execution priority (1-10)")
 
 
+class QueryType(str, Enum):
+    """Classification of query complexity."""
+
+    SIMPLE = "simple"  # Direct tool call, no Critic needed
+    COMPLEX = "complex"  # Need full pipeline with Critic
+
+
 class OrchestratorPlan(BaseModel):
     """Complete execution plan from orchestrator."""
 
@@ -43,6 +53,10 @@ class OrchestratorPlan(BaseModel):
         default=True, description="Whether tools can run in parallel"
     )
     expected_outcome: str = Field(..., description="What result should look like")
+    query_type: QueryType = Field(
+        default=QueryType.COMPLEX,
+        description="Type of query - simple queries skip Critic",
+    )
 
 
 class ToolResult(BaseModel):
@@ -69,23 +83,19 @@ class OrchestratorResponse(BaseModel):
     iteration_reason: Optional[str] = Field(default=None)
 
 
-class OrchestratorAgent:
+class OrchestratorAgent(BaseAgent):
     """
     Orchestrator Agent - Phân phối và điều phối.
-
-    Quy trình:
-    1. Nhận user query
-    2. Tạo kế hoạch (plan) - xác định cần dùng tools nào
-    3. Gửi plan cho Critic đánh giá
-    4. Nếu approved → thực thi tools
-    5. Tổng hợp kết quả
-    6. Nếu chưa đạt → lặp lại từ bước 2
     """
 
     SYSTEM_PROMPT = """Bạn là Orchestrator Agent trong hệ thống AI Finance Assistant.
 
+TRẠNG THÁI QUAN TRỌNG:
+Kiến thức huấn luyện nội tại của bạn có giới hạn về thời gian và CÓ THỂ ĐÃ LỖI THỜI đối với dữ liệu tài chính (giá cổ phiếu, tin tức, báo cáo tài chính). 
+KHÔNG ĐƯỢC phép dựa vào trí nhớ/kiến thức cũ để trả lời các thông tin định lượng hoặc thời sự.
+
 NHIỆM VỤ:
-Phân tích yêu cầu của ngưởi dùng và lập kế hoạch sử dụng các công cụ (tools) để thu thập thông tin.
+Phân tích yêu cầu và lập kế hoạch sử dụng tools để thu thập thông tin MỚI NHẤT.
 
 CÁC TOOLS CÓ SẴN:
 1. **tavily_web_search** - Tìm kiếm thông tin trên web
@@ -93,18 +103,18 @@ CÁC TOOLS CÓ SẴN:
    - Parameters: query (str), search_depth ("basic"/"comprehensive"), max_results (int), recency_days (int)
 
 2. **vnstock_get_quote** - Lấy giá cổ phiếu VN hiện tại
-   - Dùng khi cần: Giá real-time của cổ phiếu VN
+   - Dùng khi cần: Giá real-time của cổ phiếu VN - PHẢI DÙNG cho mọi câu hỏi về giá hiện tại.
    - Parameters: symbol (str) - ví dụ: "VCB", "VNM"
 
 3. **vnstock_get_company_info** - Lấy thông tin công ty VN
-   - Dùng khi cần: Thông tin cơ bản, P/E, P/B, vốn hóa
+   - Dùng khi cần: Thông tin cơ bản, P/E, P/B, vốn hóa (Dữ liệu này thay đổi liên tục, không dùng kiến thức cũ).
    - Parameters: symbol (str)
 
 QUY TẮC LẬP KẾ HOẠCH:
-1. Phân tích intent: Ngưởi dùng muốn gì? (giá, tin tức, phân tích...)
-2. Xác định tools cần thiết
-3. Nếu cần thông tin real-time + tin tức → dùng CẢ HAI song song
-4. Ưu tiên vnstock cho dữ liệu chính xác, tavily cho tin tức/phân tích
+1. **Tool-First Mentality**: Coi kiến thức cũ của bạn là "không đáng tin" cho dữ liệu tài chính. Luôn ưu tiên dùng tools.
+2. Phân tích intent: Tập trung vào những gì người dùng cần biết NGAY BÂY GIỜ.
+3. Nếu cần thông tin real-time + tin tức → dùng CẢ HAI song song.
+4. Ưu tiên vnstock cho dữ liệu chính xác, tavily cho tin tức/phân tích.
 
 OUTPUT FORMAT (JSON):
 {
@@ -121,22 +131,10 @@ OUTPUT FORMAT (JSON):
     "can_parallel": true|false,
     "expected_outcome": "..."
 }
-
-VÍ DỤ:
-Query: "Cổ phiếu VCB hôm nay thế nào?"
-→ interpreted_intent: "Ngưởi dùng muốn biết giá VCB hiện tại và tin tức liên quan"
-→ tools: [
-    {tool_name: "vnstock_get_quote", parameters: {symbol: "VCB"}, reason: "Lấy giá real-time", priority: 1},
-    {tool_name: "tavily_web_search", parameters: {query: "VCB Vietcombank cổ phiếu tin tức hôm nay", search_depth: "basic", max_results: 5}, reason: "Tìm tin tức mới nhất", priority: 2}
-]
-→ can_parallel: true
 """
 
     def __init__(self):
-        self.model = genai.GenerativeModel(
-            model_name=settings.PRIMARY_MODEL,
-            system_instruction=self.SYSTEM_PROMPT,
-        )
+        super().__init__(system_prompt=self.SYSTEM_PROMPT)
 
         # Tool registry
         self.tools: Dict[str, Callable] = {
@@ -144,6 +142,132 @@ Query: "Cổ phiếu VCB hôm nay thế nào?"
             "vnstock_get_quote": vnstock_get_quote,
             "vnstock_get_company_info": vnstock_get_company_info,
         }
+
+        # Simple query patterns - direct tool execution, no Critic needed
+        self._simple_patterns = [
+            # Stock price patterns
+            (r"giá\s+(?:cổ phiếu\s+|cp\s+)?([A-Z]{2,4})\b", "vnstock_get_quote"),
+            (
+                r"(?:cổ phiếu|cp)\s+([A-Z]{2,4})\s+(?:bao nhiêu|hiện tại)",
+                "vnstock_get_quote",
+            ),
+            (r"([A-Z]{2,4})\s+(?:bao nhiêu|giá|hiện tại)", "vnstock_get_quote"),
+            # Company info patterns
+            (
+                r"thông tin\s+(?:công ty|cổ phiếu|cp)?\s*([A-Z]{2,4})\b",
+                "vnstock_get_company_info",
+            ),
+        ]
+
+    def classify_query(self, user_query: str) -> QueryType:
+        """
+        Classify query as SIMPLE or COMPLEX.
+
+        SIMPLE: Direct data lookup (stock price, basic info) - no Critic needed
+        COMPLEX: Analysis, comparison, news synthesis - needs Critic review
+        """
+        query_lower = user_query.lower().strip()
+
+        # Check for simple patterns
+        for pattern, tool in self._simple_patterns:
+            if re.search(pattern, user_query, re.IGNORECASE):
+                return QueryType.SIMPLE
+
+        # Complex indicators
+        complex_indicators = [
+            "so sánh",
+            "so sánh",
+            "phân tích",
+            "dự đoán",
+            "xu hướng",
+            "tư vấn",
+            "nên mua",
+            "nên bán",
+            "đầu tư",
+            "chiến lược",
+            "tại sao",
+            "vì sao",
+            "lý do",
+            "đánh giá",
+            "nhận định",
+            "tổng hợp",
+            "tóm tắt",
+            "so sánh",
+            "với",
+            "hay",
+            "hoặc",
+        ]
+
+        for indicator in complex_indicators:
+            if indicator in query_lower:
+                return QueryType.COMPLEX
+
+        # Default to simple for short queries
+        if len(user_query.split()) <= 5:
+            return QueryType.SIMPLE
+
+        return QueryType.COMPLEX
+
+    def create_simple_plan(self, user_query: str) -> OrchestratorPlan:
+        """
+        Create plan for simple queries without LLM call.
+        Uses pattern matching for faster execution.
+        """
+        # Try to match stock price query
+        for pattern, tool_name in self._simple_patterns:
+            match = re.search(pattern, user_query, re.IGNORECASE)
+            if match:
+                symbol = match.group(1).upper()
+
+                if tool_name == "vnstock_get_quote":
+                    return OrchestratorPlan(
+                        original_query=user_query,
+                        interpreted_intent=f"Lấy giá cổ phiếu {symbol}",
+                        tools=[
+                            ToolPlan(
+                                tool_name="vnstock_get_quote",
+                                parameters={"symbol": symbol},
+                                reason=f"Lấy giá real-time cho {symbol}",
+                                priority=1,
+                            )
+                        ],
+                        can_parallel=False,
+                        expected_outcome=f"Giá cổ phiếu {symbol} hiện tại",
+                        query_type=QueryType.SIMPLE,
+                    )
+                elif tool_name == "vnstock_get_company_info":
+                    return OrchestratorPlan(
+                        original_query=user_query,
+                        interpreted_intent=f"Lấy thông tin công ty {symbol}",
+                        tools=[
+                            ToolPlan(
+                                tool_name="vnstock_get_company_info",
+                                parameters={"symbol": symbol},
+                                reason=f"Lấy thông tin công ty {symbol}",
+                                priority=1,
+                            )
+                        ],
+                        can_parallel=False,
+                        expected_outcome=f"Thông tin cơ bản về {symbol}",
+                        query_type=QueryType.SIMPLE,
+                    )
+
+        # Fallback to web search for unmatched simple queries
+        return OrchestratorPlan(
+            original_query=user_query,
+            interpreted_intent="Tìm kiếm thông tin",
+            tools=[
+                ToolPlan(
+                    tool_name="tavily_web_search",
+                    parameters={"query": user_query, "max_results": 3},
+                    reason="Tìm kiếm thông tin liên quan",
+                    priority=1,
+                )
+            ],
+            can_parallel=False,
+            expected_outcome="Thông tin về yêu cầu",
+            query_type=QueryType.SIMPLE,
+        )
 
     async def create_plan(self, user_query: str) -> OrchestratorPlan:
         """
@@ -163,7 +287,7 @@ Chỉ trả về JSON, không thêm text khác.
 """
 
         try:
-            response = await self.model.generate_content_async(prompt)
+            response = await self.generate_content_async(prompt)
             content = response.text
 
             # Extract JSON from response
@@ -204,6 +328,19 @@ Chỉ trả về JSON, không thêm text khác.
         """
         results = []
 
+        # DEBUG - Use flush to ensure output
+        import sys
+
+        print(
+            f"[ORCH DEBUG] plan.tools: {len(plan.tools)}, names: {[t.tool_name for t in plan.tools]}",
+            flush=True,
+        )
+        sys.stdout.flush()
+
+        if not plan.tools:
+            print("[ORCH DEBUG] No tools to execute!", flush=True)
+            return results
+
         if plan.can_parallel:
             # Execute all tools in parallel
             tasks = []
@@ -235,6 +372,13 @@ Chỉ trả về JSON, không thêm text khác.
                 result = await self._execute_single_tool(tool_plan)
                 results.append(result)
 
+        import sys
+
+        print(
+            f"[ORCH DEBUG] Returning {len(results)} results: {[(r.tool_name, r.success) for r in results]}",
+            flush=True,
+        )
+        sys.stdout.flush()
         return results
 
     async def _execute_single_tool(self, tool_plan: ToolPlan) -> ToolResult:
@@ -243,18 +387,28 @@ Chỉ trả về JSON, không thêm text khác.
 
         start_time = time.time()
 
+        # DEBUG: Log tool execution
+        print(f"[DEBUG] Executing tool: {tool_plan.tool_name}")
+        print(f"[DEBUG] Parameters: {tool_plan.parameters}")
+        print(f"[DEBUG] Available tools: {list(self.tools.keys())}")
+
         try:
             if tool_plan.tool_name not in self.tools:
+                print(f"[DEBUG] Tool '{tool_plan.tool_name}' NOT FOUND in registry!")
                 return ToolResult(
                     tool_name=tool_plan.tool_name,
                     success=False,
                     result="",
                     execution_time=time.time() - start_time,
-                    error=f"Tool '{tool_plan.tool_name}' not found",
+                    error=f"Tool '{tool_plan.tool_name}' not found. Available: {list(self.tools.keys())}",
                 )
 
             tool_func = self.tools[tool_plan.tool_name]
+            print(f"[DEBUG] Calling tool function: {tool_func.__name__}")
             result = await tool_func(**tool_plan.parameters)
+            print(
+                f"[DEBUG] Tool result: {result[:200] if len(result) > 200 else result}..."
+            )
 
             return ToolResult(
                 tool_name=tool_plan.tool_name,
@@ -264,6 +418,10 @@ Chỉ trả về JSON, không thêm text khác.
             )
 
         except Exception as e:
+            print(f"[DEBUG] Tool execution error: {str(e)}")
+            import traceback
+
+            traceback.print_exc()
             return ToolResult(
                 tool_name=tool_plan.tool_name,
                 success=False,
@@ -317,7 +475,7 @@ Chỉ trả về câu trả lời, không cần giải thích quá trình.
 """
 
         try:
-            response = await self.model.generate_content_async(synthesis_prompt)
+            response = await self.generate_content_async(synthesis_prompt)
             synthesized_answer = response.text
         except Exception as e:
             synthesized_answer = f"Lỗi khi tổng hợp: {str(e)}"

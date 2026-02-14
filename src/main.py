@@ -1,3 +1,11 @@
+import sys
+import io
+
+# Fix Windows encoding issue (charmap codec error)
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -19,10 +27,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(conversations.router, prefix="/api")
-app.include_router(agent.router, prefix="/api")
-app.include_router(agent_mock.router, prefix="/api")  # Mock endpoints cho Agent 3
+# Include routers - v1 API
+app.include_router(conversations.router, prefix="/api/v1")
+app.include_router(agent.router, prefix="/api/v1")
+app.include_router(agent_mock.router, prefix="/api/v1")  # Mock endpoints cho Agent 3
+
+# Legacy routes (non-v1) for backward compatibility
+app.include_router(conversations.router, prefix="/api", tags=["conversations-legacy"])
+app.include_router(agent.router, prefix="/api", tags=["agent-legacy"])
+app.include_router(agent_mock.router, prefix="/api", tags=["agent-mock-legacy"])
 
 
 @app.get("/")

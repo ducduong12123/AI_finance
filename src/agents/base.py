@@ -25,6 +25,9 @@ class BaseAgent:
             tools=self.tools,
         )
         self.chat_session = None
+        self.total_tokens = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
 
     def start_session(self, history: List[Message] = None):
         """Initializes or resumes a chat session."""
@@ -41,7 +44,28 @@ class BaseAgent:
         if not self.chat_session:
             self.start_session()
 
-        # Note: In a real implementation, we would pass tools to the GenerativeModel constructor
-        # or use the tool_config for function calling.
         response = self.chat_session.send_message(prompt, stream=True)
         return response
+
+    async def generate_content_async(self, prompt: str) -> Any:
+        """Helper for non-streaming calls that tracks tokens."""
+        response = await self.model.generate_content_async(prompt)
+        self._update_tokens(response.usage_metadata)
+        return response
+
+    def _update_tokens(self, usage):
+        """Updates token counts from usage metadata."""
+        if usage:
+            self.input_tokens += usage.prompt_token_count
+            self.output_tokens += usage.candidates_token_count
+            self.total_tokens += usage.total_token_count
+
+    def get_token_usage(self) -> Dict[str, int]:
+        """Returns and resets token usage."""
+        usage = {
+            "input": self.input_tokens,
+            "output": self.output_tokens,
+            "total": self.total_tokens,
+        }
+        # Optionally reset if needed, but for now we keep accumulating
+        return usage

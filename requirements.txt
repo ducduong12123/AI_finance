@@ -31,7 +31,13 @@ langchain-text-splitters==0.0.1
 # Multi-Agent System Dependencies (NEW)
 # ======================================
 aiohttp==3.9.1              # For Tavily API async requests
-vnstock==0.2.6              # Vietnam stock market data (TCBS & SSI APIs)
+vnstock>=3.0.0              # Vietnam stock market data (latest API)
+tavily-python>=0.3.0        # Tavily search API
+
+# Additional deps for Railway
+websockets>=12.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
 
 # Utils
 httpx==0.26.0

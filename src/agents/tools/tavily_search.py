@@ -3,6 +3,8 @@ Tavily Web Search Tool.
 
 Integration with Tavily API for AI-optimized web search.
 Tavily provides search results specifically formatted for LLM consumption.
+
+API Reference: https://docs.tavily.com/documentation/api-reference/endpoint/search
 """
 
 import asyncio
@@ -29,10 +31,18 @@ class TavilySearchResponse(BaseModel):
     query: str = Field(..., description="Original search query")
     results: List[TavilySearchResult] = Field(default_factory=list)
     answer: Optional[str] = Field(
-        default=None, description="AI-generated answer if include_answer=True"
+        default=None, description="AI-generated answer if include_answer is set"
     )
     total_results: int = Field(default=0)
     search_time: float = Field(default=0.0, description="Search time in seconds")
+
+
+# Valid search_depth values per Tavily API docs
+VALID_SEARCH_DEPTHS = ("basic", "advanced", "fast", "ultra-fast")
+# Valid topic values
+VALID_TOPICS = ("general", "news", "finance")
+# Valid time_range values
+VALID_TIME_RANGES = ("day", "week", "month", "year", "d", "w", "m", "y")
 
 
 class TavilySearchTool:
@@ -51,22 +61,29 @@ class TavilySearchTool:
     async def search(
         self,
         query: str,
-        search_depth: str = "basic",  # "basic" or "comprehensive"
+        search_depth: str = "basic",  # "basic", "advanced", "fast", "ultra-fast"
+        topic: str = "general",  # "general", "news", "finance"
+        time_range: Optional[str] = None,  # "day", "week", "month", "year"
         max_results: int = 5,
         include_answer: bool = True,
         include_raw_content: bool = False,
-        days: Optional[int] = None,  # Filter by recency (e.g., 7 for last week)
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None,
     ) -> TavilySearchResponse:
         """
         Execute web search using Tavily API.
 
         Args:
             query: Search query
-            search_depth: "basic" (fast) or "comprehensive" (thorough)
+            search_depth: "basic" (balanced), "advanced" (highest relevance),
+                          "fast" (lower latency), "ultra-fast" (minimal latency)
+            topic: "general", "news" (real-time updates), "finance" (financial data)
+            time_range: Filter by recency - "day", "week", "month", "year"
             max_results: Number of results (1-20)
             include_answer: Include AI-generated answer
             include_raw_content: Include full page content
-            days: Filter results by days (e.g., 7 for last week)
+            include_domains: List of domains to include
+            exclude_domains: List of domains to exclude
 
         Returns:
             TavilySearchResponse with results
@@ -83,13 +100,18 @@ class TavilySearchTool:
                 "api_key": self.api_key,
                 "query": query,
                 "search_depth": search_depth,
+                "topic": topic,
                 "max_results": max_results,
                 "include_answer": include_answer,
                 "include_raw_content": include_raw_content,
             }
 
-            if days:
-                payload["days"] = days
+            if time_range:
+                payload["time_range"] = time_range
+            if include_domains:
+                payload["include_domains"] = include_domains
+            if exclude_domains:
+                payload["exclude_domains"] = exclude_domains
 
             start_time = asyncio.get_event_loop().time()
 
@@ -196,12 +218,71 @@ class TavilySearchTool:
 tavily_tool = TavilySearchTool()
 
 
-# Function interface for Gemini tool calling
+def _normalize_search_depth(value: str) -> str:
+    """Normalize search_depth to a valid Tavily API value."""
+    if value in VALID_SEARCH_DEPTHS:
+        return value
+    # Map common aliases
+    mapping = {
+        "comprehensive": "advanced",
+        "deep": "advanced",
+        "quick": "fast",
+        "fastest": "ultra-fast",
+    }
+    return mapping.get(value, "basic")
+
+
+def _normalize_topic(value: str) -> str:
+    """Normalize topic to a valid Tavily API value."""
+    if value in VALID_TOPICS:
+        return value
+    mapping = {
+        "financial": "finance",
+        "stock": "finance",
+        "market": "finance",
+        "breaking": "news",
+        "current": "news",
+    }
+    return mapping.get(value, "general")
+
+
+def _normalize_time_range(value: Any) -> Optional[str]:
+    """Normalize time_range — handle both string and legacy integer (days) format."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value in VALID_TIME_RANGES:
+        return value
+    # Handle legacy integer days format from Orchestrator
+    if isinstance(value, (int, float)):
+        days = int(value)
+        if days <= 1:
+            return "day"
+        elif days <= 7:
+            return "week"
+        elif days <= 30:
+            return "month"
+        else:
+            return "year"
+    # Handle string integers
+    if isinstance(value, str):
+        try:
+            return _normalize_time_range(int(value))
+        except ValueError:
+            pass
+    return "day"
+
+
+# Function interface for Orchestrator tool calling
 async def tavily_web_search(
     query: str,
     search_depth: str = "basic",
+    topic: str = "general",
+    time_range: Optional[str] = None,
     max_results: int = 5,
+    # Legacy parameter — kept for backward compatibility
     recency_days: Optional[int] = None,
+    days: Optional[int] = None,
+    **kwargs,  # Absorb any extra params from Orchestrator
 ) -> str:
     """
     Search the web using Tavily AI search engine.
@@ -214,20 +295,33 @@ async def tavily_web_search(
 
     Args:
         query: Search query (should be specific and in Vietnamese for VN stocks)
-        search_depth: "basic" for quick results, "comprehensive" for detailed analysis
+        search_depth: "basic" (balanced), "advanced" (detailed), "fast" (quick)
+        topic: "general", "news" (real-time updates), "finance" (financial data)
+        time_range: "day", "week", "month", "year" — filter by recency
         max_results: Number of results (1-10 recommended)
-        recency_days: Filter by recent days (e.g., 7 for last week, 30 for last month)
+        recency_days: (Legacy) Filter by recent days — auto-converted to time_range
 
     Returns:
         Formatted search results with summaries and sources
     """
+    # Normalize parameters to match Tavily API spec
+    search_depth = _normalize_search_depth(search_depth)
+    topic = _normalize_topic(topic)
+
+    # Handle legacy days parameter → time_range
+    if time_range is None and (recency_days or days):
+        time_range = _normalize_time_range(recency_days or days)
+    elif time_range is not None:
+        time_range = _normalize_time_range(time_range)
+
     try:
         response = await tavily_tool.search(
             query=query,
             search_depth=search_depth,
+            topic=topic,
+            time_range=time_range,
             max_results=max_results,
             include_answer=True,
-            days=recency_days,
         )
         return tavily_tool.format_results_for_llm(response)
     except Exception as e:

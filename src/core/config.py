@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     ENV: str = "development"
 
     # AI Models (Google Gemini - Single Source of Truth)
-    PRIMARY_MODEL: str = "gemini-2.0-flash"
+    PRIMARY_MODEL: str = "gemini-3-flash-preview"
     EMBEDDING_MODEL: str = "gemini-embedding-001"
 
     # API Keys
