@@ -1,8 +1,8 @@
 [tool.poetry]
 name = "ai-finance-assistant"
 version = "0.1.0"
-description = "AI Finance Assistant with Multi-Agent Orchestration"
-authors = ["Your Name <your.email@example.com>"]
+description = "Multi-agent (orchestrator + critic) finance assistant for the Vietnamese market: FastAPI, Gemini, vnstock, Tavily, Qdrant RAG"
+authors = ["Hoang Duc Duong <hdduong12123@gmail.com>"]
 readme = "README.md"
 packages = [{include = "src"}]
 

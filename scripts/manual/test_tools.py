@@ -1,6 +1,7 @@
 import asyncio
+import os
 import sys
-sys.path.insert(0, 'src')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # repo root, imports use the src. prefix
 
 from src.agents.tools.vnstock_tool import vnstock_get_quote, vnstock_get_company_info
 from src.agents.tools.tavily_search import tavily_web_search
