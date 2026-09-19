@@ -43,6 +43,12 @@ async def root():
     return {"message": f"Welcome to {settings.APP_NAME}", "status": "online"}
 
 
+@app.get("/health")
+async def health():
+    """Health check used by the Railway deploy config (railway.json)."""
+    return {"status": "ok"}
+
+
 @app.post("/api/chat")
 async def chat_endpoint(request: Request):
     """
