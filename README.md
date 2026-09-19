@@ -44,7 +44,7 @@ AgentLoop (src/agents/agent_loop.py)
    ├─ 4. Orchestrator.execute_tools()         tools run (in parallel when independent)
    ├─ 5. Critic.review_results()              score 0–5, concerns, suggestions, iteration feedback
    │        └─ not approved and iterations left → back to 2 with the critic's feedback
-   └─ 6. Orchestrator synthesises the final answer from accumulated ToolResult[]
+   └─ 6. Orchestrator synthesises the final answer from the ToolResult[] of that pass
 ```
 
 - **Orchestrator** (`orchestrator.py`) — understands the request, writes a typed plan
