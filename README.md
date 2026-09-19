@@ -108,8 +108,8 @@ Python **3.11** (pinned in `runtime.txt`; the pinned `numpy`/`pandas` versions h
 wheels).
 
 ```powershell
-git clone https://github.com/ducduong12123/AI_finance.git
-cd AI_finance
+git clone https://github.com/ducduong12123/ai-finance-assistant.git
+cd ai-finance-assistant
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
